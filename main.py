@@ -1,141 +1,138 @@
-import subprocess
-import tempfile
-import os
-import sys
+import subprocess, tempfile, os, sys, time, logging, atexit, signal
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
-# Token'i environment variable'dan al
+# Logging ayarla
+logging.basicConfig(
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    level=logging.INFO
+)
+logger = logging.getLogger(__name__)
+
 TOKEN = os.environ.get("BOT_TOKEN")
-ALLOWED_USERS = []  # Boş bırakırsanız herkes kullanabilir
+ALLOWED_USERS = []
+
+# Çalışan işlemler
+running_processes = {}
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Merhaba! Bana .py dosyası gönder, çalıştırayım.")
+    await update.message.reply_text("🤖 7/24 Python Runner\n.py gönder, hemen çalıştırayım!")
+
+async def status(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(f"✅ Bot Aktif\n📊 Çalışan işlem: {len(running_processes)}")
 
 async def handle_py_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
-        # Kullanıcı kontrolü
-        if ALLOWED_USERS and update.effective_user.id not in ALLOWED_USERS:
-            await update.message.reply_text("⛔ Yetkiniz yok!")
-            return
-
-        # Dosya kontrolü
         if not update.message.document or not update.message.document.file_name.endswith('.py'):
             return
-
-        await update.message.reply_text("📥 Dosya alındı, işleniyor...")
         
-        # Geçici dosya oluştur
+        msg = await update.message.reply_text("⬇️ İndiriliyor...")
+        
         with tempfile.TemporaryDirectory() as tmpdir:
-            file_path = os.path.join(tmpdir, "code.py")
+            file_path = os.path.join(tmpdir, "bot_code.py")
             
-            # Dosyayı indir
+            # Dosya indir
             file = await update.message.document.get_file()
             await file.download_to_drive(file_path)
+            await msg.edit_text("⚡ Çalıştırılıyor...")
             
-            # Paketleri kur ve çalıştır
-            await install_requirements(file_path, update)
-            await run_python_file(file_path, update)
+            # Hemen çalıştır
+            process = subprocess.Popen(
+                [sys.executable, file_path],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding='utf-8'
+            )
+            
+            # PID kaydet
+            pid = str(process.pid)
+            running_processes[pid] = process
+            await msg.edit_text(f"🚀 Başlatıldı! PID: {pid}")
+            
+            # Arka planda çalıştır, çıktıyı kontrol et
+            asyncio.create_task(check_process_output(process, pid, update))
+            
     except Exception as e:
-        await update.message.reply_text(f"❌ Hata: {str(e)[:500]}")
-        print(f"Handle file error: {e}")
+        await update.message.reply_text(f"❌ {str(e)[:200]}")
 
-async def install_requirements(file_path, update):
+async def check_process_output(process, pid, update):
+    """İşlem çıktısını kontrol et"""
     try:
-        # Dosyayı oku ve importları bul
-        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
-            content = f.read()
+        stdout, stderr = process.communicate(timeout=300)  # 5 dakika
         
-        # Sadece standart kütüphanede olmayan paketleri bul
-        stdlib = ['os', 'sys', 'math', 'json', 'datetime', 're', 'random', 
-                 'subprocess', 'tempfile', 'collections', 'itertools', 'functools',
-                 'time', 'logging', 'pathlib', 'typing', 'string', 'decimal',
-                 'fractions', 'hashlib', 'base64', 'html', 'urllib', 'uuid',
-                 'csv', 'pprint', 'pickle', 'sqlite3', 'socket', 'email',
-                 'ssl', 'threading', 'multiprocessing', 'asyncio', 'unittest',
-                 'doctest', 'pdb', 'profile', 'cProfile', 'traceback', 'warnings',
-                 'weakref', 'copy', 'bisect', 'heapq', 'statistics', 'typing',
-                 'abc', 'contextlib', 'dataclasses', 'enum', 'inspect', 'signal',
-                 'mmap', 'select', 'shutil', 'tempfile', 'fnmatch', 'glob',
-                 'linecache', 'platform', 'errno', 'ctypes', 'marshal', 'dis',
-                 'secrets', 'hashlib', 'hmac', 'binascii', 'colorsys', 'numbers']
-        
-        imports = set()
-        for line in content.split('\n'):
-            line = line.strip()
-            if line.startswith(('import ', 'from ')):
-                parts = line.split()
-                if len(parts) > 1:
-                    module = parts[1].split('.')[0]
-                    if module not in stdlib and not module.startswith('_'):
-                        imports.add(module)
-        
-        # Paketleri kur
-        if imports:
-            await update.message.reply_text(f"🔧 Kurulacak paketler: {', '.join(list(imports)[:5])}")
-            for package in imports:
-                try:
-                    subprocess.run([sys.executable, '-m', 'pip', 'install', package], 
-                                  capture_output=True, timeout=30, check=False)
-                except:
-                    continue
-                    
-    except Exception as e:
-        print(f"Package install error: {e}")
-
-async def run_python_file(file_path, update):
-    try:
-        await update.message.reply_text("🚀 Kod çalıştırılıyor...")
-        
-        # Kodu çalıştır
-        result = subprocess.run([sys.executable, file_path], 
-                              capture_output=True, 
-                              text=True, 
-                              timeout=30,
-                              encoding='utf-8',
-                              errors='ignore')
-        
-        # Çıktıyı formatla
-        output = ""
-        if result.stdout:
-            output += "✅ Çıktı:\n" + result.stdout[:1500]
-        if result.stderr:
-            output += "\n\n❌ Hatalar:\n" + result.stderr[:1000]
-        
-        if not output.strip():
-            output = "✅ Kod başarıyla çalıştı, çıktı üretilmedi."
-        
-        # Çıktıyı gönder
-        if len(output) > 4000:
-            await update.message.reply_text(output[:4000])
-        else:
-            await update.message.reply_text(f"```\n{output}\n```", parse_mode='MarkdownV2')
+        if stdout:
+            await update.message.reply_text(f"📤 Çıktı (PID:{pid}):\n{stdout[:2000]}")
+        if stderr:
+            await update.message.reply_text(f"⚠️ Hata (PID:{pid}):\n{stderr[:1000]}")
             
     except subprocess.TimeoutExpired:
-        await update.message.reply_text("⏰ Zaman aşımı! Kod 30 saniyeden uzun sürdü.")
-    except Exception as e:
-        await update.message.reply_text(f"❌ Çalıştırma hatası: {str(e)[:500]}")
+        await update.message.reply_text(f"⏳ PID:{pid} hala çalışıyor...")
+    finally:
+        # İşlem listeden çıkar
+        if pid in running_processes:
+            del running_processes[pid]
+
+async def list_processes(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if running_processes:
+        await update.message.reply_text(f"📋 Çalışan işlemler: {', '.join(running_processes.keys())}")
+    else:
+        await update.message.reply_text("📭 Çalışan işlem yok.")
+
+async def kill_process(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.args:
+        pid = context.args[0]
+        if pid in running_processes:
+            running_processes[pid].kill()
+            del running_processes[pid]
+            await update.message.reply_text(f"✅ {pid} durduruldu.")
+        else:
+            await update.message.reply_text("❌ İşlem bulunamadı.")
+    else:
+        await update.message.reply_text("⚠️ Kullanım: /kill PID")
+
+def cleanup():
+    """Bot kapanırken tüm işlemleri durdur"""
+    for pid, p in running_processes.items():
+        try:
+            p.kill()
+            logger.info(f"İşlem durduruldu: {pid}")
+        except:
+            pass
 
 def main():
     if not TOKEN:
-        print("❌ HATA: BOT_TOKEN environment variable ayarlanmamış!")
-        print("Render'da: Settings > Environment Variables > BOT_TOKEN ekleyin")
+        logger.error("❌ BOT_TOKEN gerekli!")
         return
     
+    # Çıkışta temizlik
+    atexit.register(cleanup)
+    signal.signal(signal.SIGTERM, lambda s, f: cleanup())
+    
+    # Botu başlat
+    app = Application.builder().token(TOKEN).build()
+    
+    # Handler'lar
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("status", status))
+    app.add_handler(CommandHandler("list", list_processes))
+    app.add_handler(CommandHandler("kill", kill_process))
+    app.add_handler(MessageHandler(filters.Document.ALL, handle_py_file))
+    
+    logger.info("🤖 7/24 Python Runner başlatılıyor...")
+    
     try:
-        # Botu başlat
-        app = Application.builder().token(TOKEN).build()
-        
-        # Handler'ları ekle
-        app.add_handler(CommandHandler("start", start))
-        app.add_handler(MessageHandler(filters.Document.ALL, handle_py_file))
-        
-        print("🤖 Bot başlatılıyor...")
-        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
-        
+        # Sürekli çalış
+        app.run_polling(
+            drop_pending_updates=True,
+            close_loop=False,
+            stop_signals=None  # Sinyalleri ignore et
+        )
+    except KeyboardInterrupt:
+        cleanup()
     except Exception as e:
-        print(f"❌ Bot başlatma hatası: {e}")
-        sys.exit(1)
+        logger.error(f"Bot hatası: {e}")
+        cleanup()
 
 if __name__ == "__main__":
     main()
