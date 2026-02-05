@@ -1,6 +1,7 @@
 import subprocess
 import tempfile
 import os
+import sys
 from telegram import Update
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
 
@@ -12,56 +13,70 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text("Merhaba! Bana .py dosyası gönder, çalıştırayım.")
 
 async def handle_py_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    # Kullanıcı kontrolü
-    if ALLOWED_USERS and update.effective_user.id not in ALLOWED_USERS:
-        await update.message.reply_text("⛔ Yetkiniz yok!")
-        return
+    try:
+        # Kullanıcı kontrolü
+        if ALLOWED_USERS and update.effective_user.id not in ALLOWED_USERS:
+            await update.message.reply_text("⛔ Yetkiniz yok!")
+            return
 
-    # Dosya kontrolü
-    if not update.message.document or not update.message.document.file_name.endswith('.py'):
-        return
+        # Dosya kontrolü
+        if not update.message.document or not update.message.document.file_name.endswith('.py'):
+            return
 
-    await update.message.reply_text("📥 Dosya alındı, işleniyor...")
-    
-    # Geçici dosya oluştur
-    with tempfile.TemporaryDirectory() as tmpdir:
-        file_path = os.path.join(tmpdir, "code.py")
+        await update.message.reply_text("📥 Dosya alındı, işleniyor...")
         
-        # Dosyayı indir
-        file = await update.message.document.get_file()
-        await file.download_to_drive(file_path)
-        
-        # Paketleri kur ve çalıştır
-        await install_requirements(file_path, update)
-        await run_python_file(file_path, update)
+        # Geçici dosya oluştur
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = os.path.join(tmpdir, "code.py")
+            
+            # Dosyayı indir
+            file = await update.message.document.get_file()
+            await file.download_to_drive(file_path)
+            
+            # Paketleri kur ve çalıştır
+            await install_requirements(file_path, update)
+            await run_python_file(file_path, update)
+    except Exception as e:
+        await update.message.reply_text(f"❌ Hata: {str(e)[:500]}")
+        print(f"Handle file error: {e}")
 
 async def install_requirements(file_path, update):
     try:
         # Dosyayı oku ve importları bul
-        with open(file_path, 'r', encoding='utf-8') as f:
+        with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
             content = f.read()
         
         # Sadece standart kütüphanede olmayan paketleri bul
         stdlib = ['os', 'sys', 'math', 'json', 'datetime', 're', 'random', 
-                 'subprocess', 'tempfile', 'collections', 'itertools', 'functools']
+                 'subprocess', 'tempfile', 'collections', 'itertools', 'functools',
+                 'time', 'logging', 'pathlib', 'typing', 'string', 'decimal',
+                 'fractions', 'hashlib', 'base64', 'html', 'urllib', 'uuid',
+                 'csv', 'pprint', 'pickle', 'sqlite3', 'socket', 'email',
+                 'ssl', 'threading', 'multiprocessing', 'asyncio', 'unittest',
+                 'doctest', 'pdb', 'profile', 'cProfile', 'traceback', 'warnings',
+                 'weakref', 'copy', 'bisect', 'heapq', 'statistics', 'typing',
+                 'abc', 'contextlib', 'dataclasses', 'enum', 'inspect', 'signal',
+                 'mmap', 'select', 'shutil', 'tempfile', 'fnmatch', 'glob',
+                 'linecache', 'platform', 'errno', 'ctypes', 'marshal', 'dis',
+                 'secrets', 'hashlib', 'hmac', 'binascii', 'colorsys', 'numbers']
         
-        imports = []
+        imports = set()
         for line in content.split('\n'):
             line = line.strip()
             if line.startswith(('import ', 'from ')):
                 parts = line.split()
                 if len(parts) > 1:
                     module = parts[1].split('.')[0]
-                    if module not in stdlib and module not in imports and not module.startswith('_'):
-                        imports.append(module)
+                    if module not in stdlib and not module.startswith('_'):
+                        imports.add(module)
         
         # Paketleri kur
         if imports:
-            await update.message.reply_text(f"🔧 Kurulacak paketler: {', '.join(imports[:5])}")
+            await update.message.reply_text(f"🔧 Kurulacak paketler: {', '.join(list(imports)[:5])}")
             for package in imports:
                 try:
-                    subprocess.run(['pip', 'install', package], 
-                                  capture_output=True, timeout=30)
+                    subprocess.run([sys.executable, '-m', 'pip', 'install', package], 
+                                  capture_output=True, timeout=30, check=False)
                 except:
                     continue
                     
@@ -73,7 +88,7 @@ async def run_python_file(file_path, update):
         await update.message.reply_text("🚀 Kod çalıştırılıyor...")
         
         # Kodu çalıştır
-        result = subprocess.run(['python', file_path], 
+        result = subprocess.run([sys.executable, file_path], 
                               capture_output=True, 
                               text=True, 
                               timeout=30,
@@ -83,9 +98,9 @@ async def run_python_file(file_path, update):
         # Çıktıyı formatla
         output = ""
         if result.stdout:
-            output += result.stdout[:2000]  # İlk 2000 karakter
+            output += "✅ Çıktı:\n" + result.stdout[:1500]
         if result.stderr:
-            output += "\n\nHatalar:\n" + result.stderr[:1000]
+            output += "\n\n❌ Hatalar:\n" + result.stderr[:1000]
         
         if not output.strip():
             output = "✅ Kod başarıyla çalıştı, çıktı üretilmedi."
@@ -94,7 +109,7 @@ async def run_python_file(file_path, update):
         if len(output) > 4000:
             await update.message.reply_text(output[:4000])
         else:
-            await update.message.reply_text(f"```\n{output}\n```", parse_mode='Markdown')
+            await update.message.reply_text(f"```\n{output}\n```", parse_mode='MarkdownV2')
             
     except subprocess.TimeoutExpired:
         await update.message.reply_text("⏰ Zaman aşımı! Kod 30 saniyeden uzun sürdü.")
@@ -107,15 +122,20 @@ def main():
         print("Render'da: Settings > Environment Variables > BOT_TOKEN ekleyin")
         return
     
-    # Botu başlat
-    app = Application.builder().token(TOKEN).build()
-    
-    # Handler'ları ekle
-    app.add_handler(CommandHandler("start", start))
-    app.add_handler(MessageHandler(filters.Document.ALL, handle_py_file))
-    
-    print("🤖 Bot başlatılıyor...")
-    app.run_polling(drop_pending_updates=True)
+    try:
+        # Botu başlat
+        app = Application.builder().token(TOKEN).build()
+        
+        # Handler'ları ekle
+        app.add_handler(CommandHandler("start", start))
+        app.add_handler(MessageHandler(filters.Document.ALL, handle_py_file))
+        
+        print("🤖 Bot başlatılıyor...")
+        app.run_polling(drop_pending_updates=True, allowed_updates=Update.ALL_TYPES)
+        
+    except Exception as e:
+        print(f"❌ Bot başlatma hatası: {e}")
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
